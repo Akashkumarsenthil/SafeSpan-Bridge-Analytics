@@ -169,7 +169,7 @@ From our sample, the approximate distribution is:
 
 From our analysis, the top correlated features with target (after removing leakage):
 
-| Feature | |Correlation| |
+| Feature | Correlation |
 |---------|-------------|
 | `YEAR_BUILT_027` (Bridge Age proxy) | 0.36 |
 | `POSTING_EVAL_070` | 0.33 |
