@@ -1,3 +1,22 @@
+# ── Raw data files (too large for GitHub) ────────────────────────────────────
 *.csv
+*.parquet
+*.gz
+*.zip
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.pyc
 __pycache__/
+
+# ── Jupyter checkpoints ───────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Claude internal files ─────────────────────────────────────────────────────
+.claude/
+
+# ── Scratch / temp ────────────────────────────────────────────────────────────
+test_*.py
