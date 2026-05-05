@@ -72,30 +72,30 @@ from sklearn.utils.class_weight import compute_sample_weight
 try:
     import lightgbm as lgb
     LGBM_AVAILABLE = True
-    print("✅ LightGBM", lgb.__version__)
+    print("LightGBM", lgb.__version__)
 except Exception:
     from sklearn.ensemble import RandomForestClassifier
     LGBM_AVAILABLE = False
-    print("⚠️  LightGBM unavailable — RandomForest fallback active")
+    print("NOTE: LightGBM unavailable — RandomForest fallback active")
 
 # ── SHAP ──────────────────────────────────────────────────────────────────────
 try:
     import shap
     SHAP_AVAILABLE = True
-    print("✅ SHAP", shap.__version__)
+    print("SHAP", shap.__version__)
 except ImportError:
     SHAP_AVAILABLE = False
-    print("⚠️  SHAP not installed — interpretability section will be skipped")
+    print("NOTE: SHAP not installed — interpretability section will be skipped")
 
 # ── lifelines ─────────────────────────────────────────────────────────────────
 try:
     from lifelines import KaplanMeierFitter, CoxPHFitter
     from lifelines.statistics import logrank_test
     LIFELINES_AVAILABLE = True
-    print("✅ lifelines available")
+    print("lifelines available")
 except ImportError:
     LIFELINES_AVAILABLE = False
-    print("⚠️  lifelines not installed — survival analysis sections skipped")
+    print("NOTE: lifelines not installed — survival analysis sections skipped")
 
 # ── Global style ──────────────────────────────────────────────────────────────
 plt.rcParams.update({
@@ -119,7 +119,7 @@ LABEL_MAP   = {c: i for i, c in enumerate(CLASS_ORDER)}  # Critical=0 … Good=3
 os.makedirs("outputs",      exist_ok=True)
 os.makedirs("outputs/plots", exist_ok=True)
 
-print("\n✅ Environment ready")
+print("\n[done] Environment ready")
 
 # %% [markdown]
 # ---
@@ -195,10 +195,10 @@ for col in train_raw.columns:
     dtype  = str(train_raw[col].dtype)
     nuniq  = train_raw[col].nunique()
     null_p = train_raw[col].isna().mean() * 100
-    flag   = "⚠️  LEAKAGE" if col in LEAKAGE_COLS else (
-              "🆔 ID/META" if col in ID_COLS else
-              "🎯 TARGET"  if col == "BRIDGE_CONDITION" else
-              "✅ FEATURE")
+    flag   = "[LEAKAGE]" if col in LEAKAGE_COLS else (
+              "[ID/META]" if col in ID_COLS else
+              "[TARGET]"  if col == "BRIDGE_CONDITION" else
+              "[done] FEATURE")
     print(f"  {flag:12s}  {col:<35s}  dtype={dtype:<8s}  nuniq={nuniq:>7,}  null={null_p:.1f}%")
 
 # %% [markdown]
@@ -543,7 +543,7 @@ for yr in compare_years:
 
 psi_df = pd.DataFrame(psi_records)
 psi_df.to_csv("outputs/psi_numeric_drift.csv", index=False)
-print("✅  Saved: outputs/psi_numeric_drift.csv")
+print("Saved: outputs/psi_numeric_drift.csv")
 
 avg_psi = (psi_df.groupby("feature")["psi"]
                  .mean()
@@ -618,7 +618,7 @@ plt.tight_layout()
 plt.savefig("outputs/plots/09_js_drift.png", dpi=150, bbox_inches="tight")
 plt.show()
 
-print("✅  Saved: outputs/js_categorical_drift.csv")
+print("Saved: outputs/js_categorical_drift.csv")
 print("\nAverage JS distance by feature:")
 print(avg_js.round(4).to_string())
 
@@ -690,7 +690,7 @@ plt.suptitle("Target Drift: Bridge Condition Distribution 2018 → 2025",
 plt.tight_layout()
 plt.savefig("outputs/plots/10_target_drift.png", dpi=150, bbox_inches="tight")
 plt.show()
-print("✅  Saved: outputs/target_drift_by_year.csv")
+print("Saved: outputs/target_drift_by_year.csv")
 
 # %% [markdown]
 # ---
@@ -785,7 +785,7 @@ else:
     model.fit(X_tr.iloc[idx], y_tr[idx])
     MODEL_NAME = "RandomForest"
 
-print(f"\n✅ {MODEL_NAME} trained")
+print(f"\n[done] {MODEL_NAME} trained")
 
 # %% [markdown]
 # ---
@@ -846,7 +846,7 @@ metrics_df = pd.DataFrame([{
     "critical_to_good_error": crit_to_good,
 }])
 metrics_df.to_csv("outputs/test_2025_metrics.csv", index=False)
-print("✅  Saved: outputs/test_2025_metrics.csv")
+print("Saved: outputs/test_2025_metrics.csv")
 
 # %%
 # ── Confusion matrix ──────────────────────────────────────────────────────────
@@ -902,7 +902,7 @@ plt.show()
 
 # %%
 if not SHAP_AVAILABLE:
-    print("⚠️  SHAP not installed — skipping. Install with: pip install shap")
+    print("NOTE: SHAP not installed — skipping. Install with: pip install shap")
 else:
     SHAP_SAMPLE = 10_000
     idx_shap = np.random.default_rng(42).choice(len(X_test), SHAP_SAMPLE, replace=False)
@@ -1019,7 +1019,7 @@ else:
     )
     model_drift.fit(X_drift_imp.iloc[idx_d], y_drift[idx_d])
 
-print(f"✅  Temporal model trained on {len(train_drift):,} rows (2018-2022)")
+print(f"Temporal model trained on {len(train_drift):,} rows (2018-2022)")
 
 # %%
 # ── Evaluate on each held-out year ────────────────────────────────────────────
@@ -1032,7 +1032,7 @@ year_dfs[2025] = test_eng
 for yr in eval_years:
     df_yr = year_dfs.get(yr)
     if df_yr is None or len(df_yr) == 0:
-        print(f"  ⚠️  No data for {yr}")
+        print(f"  No data for {yr}")
         continue
     rec = evaluate_period(model_drift, imp_drift, FEATURE_COLS, df_yr, str(yr))
     drift_results.append(rec)
@@ -1042,7 +1042,7 @@ for yr in eval_years:
 
 perf_drift_df = pd.DataFrame(drift_results)
 perf_drift_df.to_csv("outputs/model_performance_drift.csv", index=False)
-print("\n✅  Saved: outputs/model_performance_drift.csv")
+print("\nSaved: outputs/model_performance_drift.csv")
 print(perf_drift_df.to_string(index=False))
 
 # %%
@@ -1197,7 +1197,7 @@ print(f"  Median observed yrs:    {med_dur:>10.1f}")
 print(f"{'='*50}")
 
 survival_df.to_csv("outputs/survival_dataset.csv", index=False)
-print("\n✅  Saved: outputs/survival_dataset.csv")
+print("\nSaved: outputs/survival_dataset.csv")
 
 # %% [markdown]
 # ---
@@ -1214,7 +1214,7 @@ print("\n✅  Saved: outputs/survival_dataset.csv")
 
 # %%
 if not LIFELINES_AVAILABLE:
-    print("⚠️  lifelines not installed. Run: pip install lifelines")
+    print("NOTE: lifelines not installed. Run: pip install lifelines")
 else:
     # ── Overall KM ──────────────────────────────────────────────────────────
     kmf = KaplanMeierFitter()
@@ -1337,13 +1337,13 @@ if LIFELINES_AVAILABLE:
 # - HR < 1 → feature *decreases* risk (protective)
 # - HR = 1 → no effect
 #
-# ⚠️ *Caveat:* The proportional-hazards assumption requires that the hazard
+# Caution: The proportional-hazards assumption requires that the hazard
 # ratio between groups is constant over time. With only 7 observation years
 # this assumption should be validated and results treated as exploratory.
 
 # %%
 if not LIFELINES_AVAILABLE:
-    print("⚠️  lifelines not installed — skipping Cox model.")
+    print("NOTE: lifelines not installed — skipping Cox model.")
 else:
     COX_FEATURES = [
         "BRIDGE_AGE_AT_INSPECTION", "LOG_ADT",
@@ -1374,9 +1374,9 @@ else:
 
         cox_summary = cph.summary.reset_index()
         cox_summary.to_csv("outputs/cox_hazard_summary.csv", index=False)
-        print("\n✅  Saved: outputs/cox_hazard_summary.csv")
+        print("\nSaved: outputs/cox_hazard_summary.csv")
     except Exception as exc:
-        print(f"⚠️  Cox model failed: {exc}")
+        print(f"WARNING: Cox model failed: {exc}")
         cph = None
 
 # %%
@@ -1413,7 +1413,7 @@ if LIFELINES_AVAILABLE and "cph" in dir() and cph is not None:
     try:
         cph.check_assumptions(cox_df, p_value_threshold=0.05, show_plots=False)
     except Exception as exc:
-        print(f"  ⚠️  Could not run assumption check: {exc}")
+        print(f"  WARNING: Could not run assumption check: {exc}")
 
 # %% [markdown]
 # ---
@@ -1531,7 +1531,7 @@ fig.suptitle(
 )
 plt.savefig("outputs/plots/00_FINAL_DASHBOARD.png", dpi=150, bbox_inches="tight")
 plt.show()
-print("✅  Saved: outputs/plots/00_FINAL_DASHBOARD.png")
+print("Saved: outputs/plots/00_FINAL_DASHBOARD.png")
 
 # %% [markdown]
 # ---
@@ -1631,7 +1631,7 @@ output_files = [
     "outputs/plots/20_cox_hazard_ratios.png",
 ]
 for f in output_files:
-    mark = "✅" if os.path.exists(f) else "  "
+    mark = "[done]" if os.path.exists(f) else "  "
     print(f"  {mark} {f}")
 
 print("=" * 65)
