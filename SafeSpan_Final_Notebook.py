@@ -119,7 +119,7 @@ LABEL_MAP   = {c: i for i, c in enumerate(CLASS_ORDER)}  # Critical=0 … Good=3
 os.makedirs("outputs",      exist_ok=True)
 os.makedirs("outputs/plots", exist_ok=True)
 
-print("\n[done] Environment ready")
+print("\nEnvironment ready")
 
 # %% [markdown]
 # ---
@@ -198,7 +198,7 @@ for col in train_raw.columns:
     flag   = "[LEAKAGE]" if col in LEAKAGE_COLS else (
               "[ID/META]" if col in ID_COLS else
               "[TARGET]"  if col == "BRIDGE_CONDITION" else
-              "[done] FEATURE")
+              "[FEATURE]")
     print(f"  {flag:12s}  {col:<35s}  dtype={dtype:<8s}  nuniq={nuniq:>7,}  null={null_p:.1f}%")
 
 # %% [markdown]
@@ -785,7 +785,7 @@ else:
     model.fit(X_tr.iloc[idx], y_tr[idx])
     MODEL_NAME = "RandomForest"
 
-print(f"\n[done] {MODEL_NAME} trained")
+print(f"\n{MODEL_NAME} training complete")
 
 # %% [markdown]
 # ---
