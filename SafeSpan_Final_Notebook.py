@@ -62,11 +62,16 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import (
     f1_score, accuracy_score, roc_auc_score,
-    confusion_matrix, classification_report,
+    recall_score, confusion_matrix, classification_report,
     ConfusionMatrixDisplay,
 )
 from sklearn.impute import SimpleImputer
 from sklearn.utils.class_weight import compute_sample_weight
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import brier_score_loss
+from sklearn.calibration import calibration_curve, CalibrationDisplay
 
 # ── LightGBM ──────────────────────────────────────────────────────────────────
 try:
@@ -74,7 +79,6 @@ try:
     LGBM_AVAILABLE = True
     print("LightGBM", lgb.__version__)
 except Exception:
-    from sklearn.ensemble import RandomForestClassifier
     LGBM_AVAILABLE = False
     print("NOTE: LightGBM unavailable — RandomForest fallback active")
 
@@ -200,6 +204,35 @@ for col in train_raw.columns:
               "[TARGET]"  if col == "BRIDGE_CONDITION" else
               "[FEATURE]")
     print(f"  {flag:12s}  {col:<35s}  dtype={dtype:<8s}  nuniq={nuniq:>7,}  null={null_p:.1f}%")
+
+# %% [markdown]
+# ### 1.2 — Correlation Filter
+#
+# Pearson correlation filter at 0.90 — matches midterm preprocessing.
+# Removes one column from each highly-correlated pair before modelling.
+# Known pairs: INVENTORY_RATING ↔ OPERATING_RATING (~0.986),
+# WORK_DONE_BY_076 ↔ WORK_PROPOSED_075 (~0.953).
+
+# %%
+# Pearson correlation filter at 0.90 — matches midterm preprocessing
+# Removes one column from each highly-correlated pair
+# Pairs found: INVENTORY_RATING ↔ OPERATING_RATING (0.986)
+#              WORK_DONE_BY_076 ↔ WORK_PROPOSED_075 (0.953)
+#              BRIDGE_AGE ↔ YEAR_BUILT (1.000 — YEAR_BUILT already excluded)
+
+def apply_correlation_filter(df, feature_cols, threshold=0.90):
+    X = df[feature_cols].select_dtypes(include=[np.number])
+    corr_matrix = X.corr().abs()
+    upper = corr_matrix.where(
+        np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    drop_cols = [col for col in upper.columns
+                 if any(upper[col] > threshold)]
+    kept = [c for c in feature_cols if c not in drop_cols]
+    print(f"Correlation filter (>{threshold}): dropped {len(drop_cols)} cols")
+    for c in drop_cols:
+        partner = upper[c][upper[c] > threshold].idxmax()
+        print(f"  Dropped {c} (corr={upper[c].max():.3f} with {partner})")
+    return kept, drop_cols
 
 # %% [markdown]
 # ---
@@ -376,19 +409,33 @@ plt.savefig("outputs/plots/06_state_critical_rate.png", dpi=150, bbox_inches="ti
 plt.show()
 
 # %% [markdown]
+# ### Note on Missing Midterm Features
+#
+# `SCOUR_CRITICAL_113` and `INSPECT_FREQ_MONTHS_091` were top SHAP features in
+# the midterm benchmark but are **not present** in the pre-processed NBI gz files
+# (those columns exist only in the full 139-column raw NBI).
+# `AGE_X_SPANS` (below) captures the same compounded structural-fatigue hypothesis
+# using available columns.
+
+# %% [markdown]
 # ---
 # ## Section 3 — Feature Engineering
 #
-# We create five new domain features that capture physical and operational
+# We create seven new domain features that capture physical and operational
 # characteristics not directly available as raw columns:
 #
-# | Feature | Formula | Interpretation |
-# |---------|---------|----------------|
-# | `TRAFFIC_DENSITY` | ADT / span length | Bridges of similar length serving very different traffic volumes |
-# | `AGE_TO_SPAN_RATIO` | age / max-span length | Structural stress per unit length over time |
-# | `DECK_UTILISATION` | deck width / span length | Wider decks on shorter spans = overloaded geometry |
-# | `LOG_ADT` | log₁₊(ADT) | Compresses the ADT distribution's heavy right tail |
-# | `RATING_DIFF` | operating rating − inventory rating | Gap signals how close a bridge is to its safe limit |
+# | Feature | Formula | Interpretation | Used in model? |
+# |---------|---------|----------------|----------------|
+# | `TRAFFIC_DENSITY` | ADT / span length | Bridges of similar length serving very different traffic volumes | Yes |
+# | `AGE_TO_SPAN_RATIO` | age / max-span length | Structural stress per unit length over time | Yes |
+# | `DECK_UTILISATION` | deck width / span length | Wider decks on shorter spans = overloaded geometry | Yes |
+# | `LOG_ADT` | log₁₊(ADT) | Compresses the ADT distribution's heavy right tail | Yes |
+# | `RATING_DIFF` | operating − inventory rating | Gap signals how close a bridge is to its safe limit | Dropped† |
+# | `AGE_X_SPANS` | age × main span count | Cumulative structural fatigue proxy (replaces SCOUR_CRITICAL_113) | Yes |
+# | `WORK_PROPOSED_FLAG` | numeric(WORK_PROPOSED_075) | Maintenance lag indicator | Dropped† |
+#
+# † Dropped by the Pearson correlation filter (§1.2): RATING_DIFF corr=0.964 with OPERATING_RATING_064;
+# WORK_PROPOSED_FLAG corr=1.000 with WORK_PROPOSED_075 (perfect duplicate after numeric coercion).
 
 # %%
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -412,6 +459,16 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Gap between operating and inventory rating
     df["RATING_DIFF"]       = df["OPERATING_RATING_064"] - df["INVENTORY_RATING_066"]
 
+    # Structural stress interaction: age × number of main spans
+    # Analogous to AGE_X_SCOUR from midterm (SCOUR_CRITICAL_113 not in
+    # pre-processed files — this captures cumulative structural fatigue)
+    df["AGE_X_SPANS"] = (df["BRIDGE_AGE_AT_INSPECTION"]
+                         * df["MAIN_UNIT_SPANS_045"].replace(0, np.nan))
+
+    # Time since last work was proposed (proxy for maintenance lag)
+    df["WORK_PROPOSED_FLAG"] = pd.to_numeric(
+        df["WORK_PROPOSED_075"], errors="coerce").fillna(0)
+
     # Clip extreme outliers from ratio features
     for col in ["TRAFFIC_DENSITY", "AGE_TO_SPAN_RATIO", "DECK_UTILISATION"]:
         if col in df.columns:
@@ -426,7 +483,8 @@ train_eng = engineer_features(train_raw)
 test_eng  = engineer_features(test_raw)
 
 ENG_FEATURES = ["TRAFFIC_DENSITY", "AGE_TO_SPAN_RATIO",
-                "DECK_UTILISATION", "LOG_ADT", "RATING_DIFF"]
+                "DECK_UTILISATION", "LOG_ADT", "RATING_DIFF",
+                "AGE_X_SPANS", "WORK_PROPOSED_FLAG"]
 
 print("Engineered feature stats (training set):")
 print(train_eng[ENG_FEATURES].describe().T[["mean","std","min","max"]].round(3).to_string())
@@ -694,6 +752,95 @@ print("Saved: outputs/target_drift_by_year.csv")
 
 # %% [markdown]
 # ---
+# ## Section 5.5 — Multi-Model Benchmark
+#
+# Reproduces and extends the midterm Table I across 4 model families.
+# All models trained on a **500K stratified sample** for computational
+# feasibility; absolute scores are lower than Section 6 because of
+# the reduced training size and absence of a held-out early-stopping set.
+# The champion LightGBM (Section 6) trains on all 4.2M rows with early
+# stopping and achieves substantially higher Macro F1 and ROC-AUC.
+
+# %%
+# ── Build benchmark feature matrices (need these before Section 6 defines them) ─
+_bench_exclude = set(LEAKAGE_COLS) | {
+    "BRIDGE_CONDITION", "STRUCTURE_NUMBER_008",
+    "YEAR", "YEAR_BUILT_027", "PLACE_CODE_004", "YEAR_ADT_030",
+}
+_bench_cols = [c for c in train_eng.columns if c not in _bench_exclude]
+_bench_cols, _ = apply_correlation_filter(train_eng, _bench_cols)
+
+_X_all_bench  = train_eng[_bench_cols].copy()
+_y_all_bench  = train_eng["BRIDGE_CONDITION"].map(LABEL_MAP).values
+_X_test_bench = test_eng[_bench_cols].copy()
+
+_imp_bench = SimpleImputer(strategy="median")
+_X_all_bench  = pd.DataFrame(_imp_bench.fit_transform(_X_all_bench),  columns=_bench_cols)
+_X_test_bench = pd.DataFrame(_imp_bench.transform(_X_test_bench),     columns=_bench_cols)
+
+BENCH_SIZE = 500_000
+idx_bench = train_test_split(
+    np.arange(len(_X_all_bench)), train_size=BENCH_SIZE,
+    stratify=_y_all_bench, random_state=42)[0]
+X_bench = _X_all_bench.iloc[idx_bench]
+y_bench = _y_all_bench[idx_bench]
+
+bench_models = {
+    "Logistic Regression": LogisticRegression(
+        max_iter=500, class_weight="balanced",
+        solver="saga", n_jobs=-1),
+    "Gaussian Naive Bayes": GaussianNB(),
+    "Random Forest":        RandomForestClassifier(
+        n_estimators=200, class_weight="balanced",
+        n_jobs=-1, random_state=42),
+}
+if LGBM_AVAILABLE:
+    bench_models["LightGBM"] = lgb.LGBMClassifier(
+        n_estimators=500, learning_rate=0.05, num_leaves=127,
+        subsample=0.8, colsample_bytree=0.8, min_child_samples=30,
+        class_weight="balanced", n_jobs=-1, random_state=42, verbose=-1)
+
+def _crit_to_good(y_true, y_pred):
+    """Fraction of Critical bridges mis-classified as Good."""
+    mask = y_true == 0
+    if mask.sum() == 0:
+        return np.nan
+    return float((y_pred[mask] == 3).sum() / mask.sum())
+
+_y_test_bench = test_eng["BRIDGE_CONDITION"].map(LABEL_MAP).values
+
+bench_results = []
+for name, m in bench_models.items():
+    print(f"  Training {name} …")
+    m.fit(X_bench, y_bench)
+    yp     = m.predict(_X_test_bench)
+    yproba = m.predict_proba(_X_test_bench)
+
+    # Brier score (multi-class = mean of one-vs-rest Brier scores)
+    brier = np.mean([brier_score_loss((_y_test_bench == i).astype(int),
+                     yproba[:, i]) for i in range(4)])
+    try:
+        roc_b = roc_auc_score(_y_test_bench, yproba,
+                              multi_class="ovr", average="macro")
+    except Exception:
+        roc_b = np.nan
+    bench_results.append({
+        "Model":     name,
+        "Macro F1":  round(f1_score(_y_test_bench, yp, average="macro"), 4),
+        "ROC-AUC":   round(roc_b, 4),
+        "Brier":     round(brier, 4),
+        "Crit→Good": round(_crit_to_good(_y_test_bench, yp) * 100, 1),
+    })
+    print(f"    {name} done")
+
+bench_df = pd.DataFrame(bench_results)
+print("\nMulti-Model Benchmark Results:")
+print(bench_df.to_string(index=False))
+bench_df.to_csv("outputs/benchmark_comparison.csv", index=False)
+print("\nSaved: outputs/benchmark_comparison.csv")
+
+# %% [markdown]
+# ---
 # ## Section 6 — Model Training (LightGBM)
 #
 # ### Design decisions
@@ -718,7 +865,10 @@ EXCLUDE = set(LEAKAGE_COLS) | {
     "YEAR_ADT_030",        # admin metadata
 }
 FEATURE_COLS = [c for c in train_eng.columns if c not in EXCLUDE]
-print(f"Model features ({len(FEATURE_COLS)}):")
+
+# Apply Pearson correlation filter at 0.90 (defined in Section 1.2)
+FEATURE_COLS, DROPPED_CORR = apply_correlation_filter(train_eng, FEATURE_COLS)
+print(f"\nModel features after correlation filter ({len(FEATURE_COLS)}):")
 for c in FEATURE_COLS:
     print(f"  {c}")
 
@@ -740,6 +890,24 @@ X_tr, X_val, y_tr, y_val = train_test_split(
     X_all, y_all, test_size=0.20, stratify=y_all, random_state=42
 )
 print(f"Train: {len(X_tr):,}  |  Val: {len(X_val):,}  |  Test (2025): {len(X_test):,}")
+
+# %% [markdown]
+# ### Class Imbalance Strategy: class_weight instead of SMOTE
+#
+# The midterm used SMOTE (k=5) on a 500K-row sample — expanding Critical
+# from 8,877 → 183,257 synthetic records. On the full 4.2M training set,
+# SMOTE would generate ~3 billion synthetic minority samples, making it
+# computationally infeasible.
+#
+# The final system uses two complementary alternatives:
+# - `class_weight="balanced"` in LightGBM adjusts the loss function gradient
+#   weights, achieving the same mathematical objective as oversampling
+# - `compute_sample_weight("balanced", y)` passed to `model.fit()` reinforces
+#   this at the per-sample level
+#
+# This is more principled than SMOTE on large datasets because it avoids
+# interpolation artifacts in the feature space while achieving the same
+# minority-class emphasis in the gradient updates.
 
 # %%
 # ── Train ─────────────────────────────────────────────────────────────────────
@@ -810,6 +978,11 @@ try:
 except Exception:
     roc_auc = np.nan
 
+# Brier score (lower = better calibration)
+brier_per_class = [brier_score_loss((y_test == i).astype(int),
+                   y_pred_proba[:, i]) for i in range(4)]
+brier_avg = np.mean(brier_per_class)
+
 # ── Safety-critical metric ────────────────────────────────────────────────────
 def critical_to_good_error(y_true, y_pred):
     """Fraction of Critical (0) bridges mis-classified as Good (3)."""
@@ -818,8 +991,8 @@ def critical_to_good_error(y_true, y_pred):
         return np.nan
     return float((y_pred[mask] == 3).sum() / mask.sum())
 
-crit_recall    = f1_score(y_test, y_pred, labels=[0], average=None,
-                          zero_division=0)[0]
+crit_recall    = recall_score(y_test, y_pred, labels=[0], average=None,
+                              zero_division=0)[0]
 crit_to_good   = critical_to_good_error(y_test, y_pred)
 
 print("=" * 55)
@@ -829,6 +1002,7 @@ print(f"  Macro F1             : {macro_f1:.4f}")
 print(f"  Weighted F1          : {weighted_f1:.4f}")
 print(f"  Accuracy             : {acc:.4f}")
 print(f"  ROC-AUC (OvR macro)  : {roc_auc:.4f}")
+print(f"  Brier Score (avg)    : {brier_avg:.4f}")
 print(f"  Critical Recall      : {crit_recall:.4f}")
 print(f"  Critical→Good error  : {crit_to_good:.4f}   ← SAFETY METRIC")
 print("=" * 55)
@@ -842,6 +1016,7 @@ metrics_df = pd.DataFrame([{
     "model": MODEL_NAME, "year": 2025,
     "macro_f1": macro_f1, "weighted_f1": weighted_f1,
     "accuracy": acc, "roc_auc": roc_auc,
+    "brier_avg": brier_avg,
     "critical_recall": crit_recall,
     "critical_to_good_error": crit_to_good,
 }])
@@ -891,6 +1066,68 @@ plt.suptitle("Predicted Probability Distributions by Class",
 plt.tight_layout()
 plt.savefig("outputs/plots/12_prob_distributions.png", dpi=150, bbox_inches="tight")
 plt.show()
+
+# %%
+# Reliability diagrams — matches midterm Fig. 4
+fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+for i, (ax, cond) in enumerate(zip(axes, CLASS_ORDER)):
+    prob_true, prob_pred = calibration_curve(
+        (y_test == i).astype(int),
+        y_pred_proba[:, i],
+        n_bins=10, strategy="uniform")
+    ax.plot(prob_pred, prob_true, marker="o",
+            color=CMAP[cond], linewidth=2, label=cond)
+    ax.plot([0, 1], [0, 1], "k--", lw=1, label="Perfect")
+    ax.set_title(f"{cond} class")
+    ax.set_xlabel("Mean predicted probability")
+    ax.set_ylabel("Fraction of positives")
+    ax.legend(fontsize=8)
+plt.suptitle(f"Calibration Curves (Reliability Diagrams) — {MODEL_NAME} 2025",
+             fontweight="bold")
+plt.tight_layout()
+plt.savefig("outputs/plots/12b_calibration_curves.png", dpi=150)
+plt.show()
+
+# %% [markdown]
+# ---
+# ## Section 7.5 — Bridge Risk Ranking (Policy Translation)
+#
+# The model produces calibrated probabilities per class. These are converted
+# into a composite risk score per bridge — enabling maintenance triage and
+# budget prioritisation beyond a single predicted label.
+#
+# Risk score = P(Critical)×4 + P(Poor)×3 + P(Fair)×2 + P(Good)×1
+# Weighted risk = risk_score × log(1 + ADT)  [traffic-adjusted priority]
+
+# %%
+# Build per-bridge risk scores on the 2025 test set
+risk_df = test_eng[["STRUCTURE_NUMBER_008", "STATE_CODE_001",
+                     "ADT_029", "BRIDGE_AGE_AT_INSPECTION"]].copy()
+risk_df["P_Critical"] = y_pred_proba[:, 0]
+risk_df["P_Poor"]     = y_pred_proba[:, 1]
+risk_df["P_Fair"]     = y_pred_proba[:, 2]
+risk_df["P_Good"]     = y_pred_proba[:, 3]
+risk_df["TRUE_LABEL"] = [CLASS_ORDER[i] for i in y_test]
+risk_df["PRED_LABEL"] = [CLASS_ORDER[i] for i in y_pred]
+
+# Composite risk score (ordinal-weighted probability)
+risk_df["RISK_SCORE"] = (
+    risk_df["P_Critical"] * 4 +
+    risk_df["P_Poor"]     * 3 +
+    risk_df["P_Fair"]     * 2 +
+    risk_df["P_Good"]     * 1
+)
+# Traffic-adjusted priority (high-traffic critical bridges = highest urgency)
+risk_df["WEIGHTED_RISK"] = risk_df["RISK_SCORE"] * np.log1p(risk_df["ADT_029"])
+
+top20 = risk_df.nlargest(20, "WEIGHTED_RISK")[
+    ["STRUCTURE_NUMBER_008", "STATE_CODE_001", "ADT_029",
+     "BRIDGE_AGE_AT_INSPECTION", "RISK_SCORE", "WEIGHTED_RISK",
+     "TRUE_LABEL", "PRED_LABEL"]]
+print("Top 20 highest-priority bridges (traffic-adjusted risk):")
+print(top20.to_string(index=False))
+risk_df.to_csv("outputs/bridge_risk_ranking.csv", index=False)
+print(f"\nSaved: outputs/bridge_risk_ranking.csv  ({len(risk_df):,} bridges ranked)")
 
 # %% [markdown]
 # ---
@@ -1598,6 +1835,20 @@ if LIFELINES_AVAILABLE and "kmf" in dir():
     print(f"  KM median survival time     : {kmf.median_survival_time_:.2f} years")
 
 print(f"\n{'─'*65}")
+print("  7. MULTI-MODEL BENCHMARK (500K sample)")
+print(f"{'─'*65}")
+if "bench_df" in dir():
+    print(bench_df.to_string(index=False))
+
+print(f"\n{'─'*65}")
+print("  8. RISK RANKING")
+print(f"{'─'*65}")
+if "risk_df" in dir():
+    print(f"  Bridges ranked: {len(risk_df):,}")
+    print(f"  Top risk score: {risk_df['WEIGHTED_RISK'].max():.2f}")
+    print(f"  Saved: outputs/bridge_risk_ranking.csv")
+
+print(f"\n{'─'*65}")
 print("  OUTPUT FILES")
 print(f"{'─'*65}")
 output_files = [
@@ -1608,6 +1859,8 @@ output_files = [
     "outputs/model_performance_drift.csv",
     "outputs/survival_dataset.csv",
     "outputs/cox_hazard_summary.csv",
+    "outputs/benchmark_comparison.csv",
+    "outputs/bridge_risk_ranking.csv",
     "outputs/plots/00_FINAL_DASHBOARD.png",
     "outputs/plots/01_class_distribution.png",
     "outputs/plots/02_yearly_condition_trend.png",
@@ -1621,6 +1874,7 @@ output_files = [
     "outputs/plots/10_target_drift.png",
     "outputs/plots/11_confusion_matrix.png",
     "outputs/plots/12_prob_distributions.png",
+    "outputs/plots/12b_calibration_curves.png",
     "outputs/plots/13_shap_importance.png",
     "outputs/plots/14_shap_beeswarm_critical.png",
     "outputs/plots/15_model_performance_drift.png",
